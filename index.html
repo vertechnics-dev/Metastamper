@@ -1,0 +1,427 @@
+<!DOCTYPE html>
+<html lang="nl">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>DJI Drone Stamper Pro (Fix)</title>
+  <script src="https://cdn.jsdelivr.net/npm/exifreader@4/dist/exif-reader.js" async></script>
+  <style>
+    body {
+      font-family: system-ui, -apple-system, sans-serif;
+      background: #121212;
+      color: #e0e0e0;
+      margin: 0;
+      padding: 15px;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+    }
+    .container {
+      max-width: 650px;
+      width: 100%;
+      background: #1e1e1e;
+      padding: 20px;
+      border-radius: 12px;
+      box-shadow: 0 4px 15px rgba(0,0,0,0.5);
+      box-sizing: border-box;
+    }
+    h2 { margin-top: 0; color: #fff; text-align: center; }
+    .status-bar {
+      background: #252525;
+      border-left: 4px solid #0070f3;
+      padding: 10px 12px;
+      font-size: 0.9em;
+      margin-bottom: 15px;
+      border-radius: 4px;
+      color: #bbb;
+      word-break: break-word;
+    }
+    .upload-box {
+      background: #2a2a2a;
+      border: 2px dashed #0070f3;
+      padding: 15px;
+      border-radius: 8px;
+      text-align: center;
+      margin-bottom: 15px;
+    }
+    input[type="file"] {
+      width: 100%;
+      color: #fff;
+      font-size: 15px;
+      margin-top: 10px;
+    }
+    .photo-card {
+      background: #2a2a2a;
+      padding: 15px;
+      border-radius: 8px;
+      margin-bottom: 20px;
+    }
+    img.result-img {
+      width: 100%;
+      height: auto;
+      border-radius: 6px;
+      margin-top: 10px;
+      display: block;
+    }
+    .meta-info {
+      font-size: 0.9em;
+      color: #ccc;
+      margin-top: 8px;
+      margin-bottom: 10px;
+      line-height: 1.6;
+      word-break: break-word;
+    }
+    .download-btn {
+      display: block;
+      margin-top: 12px;
+      padding: 12px 16px;
+      background: #28a745;
+      color: white;
+      text-decoration: none;
+      border-radius: 6px;
+      font-weight: bold;
+      text-align: center;
+      box-sizing: border-box;
+    }
+    .warning { color: #ff9800; font-weight: bold; }
+    .error { color: #ff5252; font-weight: bold; }
+  </style>
+</head>
+<body>
+
+<div class="container">
+  <h2>DJI Drone Stamper Pro</h2>
+  
+  <div id="statusBar" class="status-bar">
+    Status: Klaar voor gebruik. Kies uw foto's via "Bestanden" / "Bladeren".
+  </div>
+
+  <div class="upload-box">
+    <strong>Kies DJI Foto's (via Bestanden/Bladeren):</strong>
+    <input type="file" id="fileInput" multiple>
+  </div>
+
+  <div id="output"></div>
+</div>
+
+<script>
+  const fileInput = document.getElementById('fileInput');
+  const output = document.getElementById('output');
+  const statusBar = document.getElementById('statusBar');
+
+  // Hulpfunctie: zet zowel decimale strings ("50.9959") als XMP DMS-strings ("50,59.754N") om naar getal
+  function parseCoordString(str) {
+    if (!str) return undefined;
+    str = str.trim();
+    // Check op XMP DMS formaat: bv. "50,59.7546N" of "4,56,52.28E"
+    if (str.includes(',')) {
+      const dir = str.slice(-1).toUpperCase();
+      const parts = str.replace(/[NSEWnsew]/g, '').split(',').map(Number);
+      let val = (parts[0] || 0) + ((parts[1] || 0) / 60) + ((parts[2] || 0) / 3600);
+      if (dir === 'S' || dir === 'W') val = -val;
+      return (!isNaN(val) && val !== 0) ? val : undefined;
+    }
+    const val = parseFloat(str.replace('+', ''));
+    return (!isNaN(val) && val !== 0) ? val : undefined;
+  }
+
+  // 1. XMP-scanner (Exact dezelfde die zojuist 27.7m en 284.7° vond, nu met veilige GPS-extractie)
+  function parseRawXmp(buffer) {
+    const maxLen = Math.min(buffer.byteLength, 524288);
+    const text = new TextDecoder('utf-8', { fatal: false }).decode(new Uint8Array(buffer, 0, maxLen));
+
+    const getRawTag = (names) => {
+      for (const name of names) {
+        const regAttr = new RegExp(`[a-zA-Z0-9_-]+:${name}=["']([^"']+)["']`, 'i');
+        const regElem = new RegExp(`<[a-zA-Z0-9_-]+:${name}>([^<]+)<\\/[a-zA-Z0-9_-]+:${name}>`, 'i');
+        const m = text.match(regAttr) || text.match(regElem);
+        if (m && m[1]) return m[1].trim();
+      }
+      return undefined;
+    };
+
+    const getNum = (names) => {
+      const raw = getRawTag(names);
+      if (raw === undefined) return undefined;
+      const val = parseFloat(raw.replace('+', ''));
+      return !isNaN(val) ? val : undefined;
+    };
+
+    return {
+      relAlt: getNum(['RelativeAltitude']),
+      absAlt: getNum(['AbsoluteAltitude']),
+      lat: parseCoordString(getRawTag(['GpsLatitude', 'Latitude', 'GPSLatitude'])),
+      lon: parseCoordString(getRawTag(['GpsLongitude', 'Longitude', 'GPSLongitude'])),
+      azimuth: getNum([
+        'PoseHeadingDegrees',
+        'GimbalYawDegree',
+        'FlightYawDegree',
+        'GimbalYaw',
+        'Yaw',
+        'GimbalAzimuth',
+        'FlightYaw'
+      ])
+    };
+  }
+
+  // 2. Binaire EXIF GPS-scanner (De bewezen werkende scanner uit v6 die 50.995910° N vond!)
+  function parseExifGps(buffer) {
+    const view = new DataView(buffer);
+    if (view.byteLength < 4 || view.getUint16(0, false) !== 0xFFD8) return {};
+
+    let offset = 2;
+    while (offset + 4 < view.byteLength) {
+      const marker = view.getUint16(offset, false);
+      offset += 2;
+      if (marker === 0xFFE1) {
+        const length = view.getUint16(offset, false);
+        if (offset + 8 < view.byteLength && view.getUint32(offset + 2, false) === 0x45786966) {
+          const tiffStart = offset + 8;
+          const littleEndian = view.getUint16(tiffStart, false) === 0x4949;
+          const firstIfdOffset = view.getUint32(tiffStart + 4, littleEndian);
+          const res = readIfdForGps(view, tiffStart, tiffStart + firstIfdOffset, littleEndian);
+          if (res.lat && res.lon) return res;
+        }
+        offset += length;
+      } else if ((marker & 0xFF00) === 0xFF00) {
+        offset += view.getUint16(offset, false);
+      } else {
+        break;
+      }
+    }
+    return {};
+  }
+
+  function readIfdForGps(view, tiffStart, dirStart, le) {
+    if (dirStart + 2 > view.byteLength) return {};
+    const entries = view.getUint16(dirStart, le);
+    for (let i = 0; i < entries; i++) {
+      const entryOffset = dirStart + 2 + (i * 12);
+      if (entryOffset + 12 > view.byteLength) break;
+      const tag = view.getUint16(entryOffset, le);
+      if (tag === 0x8825) {
+        const gpsOffset = view.getUint32(entryOffset + 8, le);
+        return parseGpsSubIfd(view, tiffStart, tiffStart + gpsOffset, le);
+      }
+    }
+    return {};
+  }
+
+  function parseGpsSubIfd(view, tiffStart, gpsStart, le) {
+    if (gpsStart + 2 > view.byteLength) return {};
+    const entries = view.getUint16(gpsStart, le);
+    let latRef = 'N', lonRef = 'E', lat, lon, alt, altRef = 0, imgDir;
+
+    const getRational = (off) => {
+      if (off + 8 > view.byteLength) return 0;
+      const num = view.getUint32(off, le);
+      const den = view.getUint32(off + 4, le);
+      return den === 0 ? 0 : num / den;
+    };
+
+    const getCoord = (off) => {
+      if (off + 24 > view.byteLength) return undefined;
+      const c = getRational(off) + (getRational(off + 8) / 60) + (getRational(off + 16) / 3600);
+      return c === 0 ? undefined : c; // Negeer lege 0.000000 velden!
+    };
+
+    for (let i = 0; i < entries; i++) {
+      const entry = gpsStart + 2 + (i * 12);
+      if (entry + 12 > view.byteLength) break;
+      const tag = view.getUint16(entry, le);
+      const valOffset = tiffStart + view.getUint32(entry + 8, le);
+
+      if (tag === 1) latRef = String.fromCharCode(view.getUint8(entry + 8));
+      else if (tag === 2) lat = getCoord(valOffset);
+      else if (tag === 3) lonRef = String.fromCharCode(view.getUint8(entry + 8));
+      else if (tag === 4) lon = getCoord(valOffset);
+      else if (tag === 5) altRef = view.getUint8(entry + 8);
+      else if (tag === 6) alt = getRational(valOffset);
+      else if (tag === 17 || tag === 24) imgDir = getRational(valOffset);
+    }
+
+    if (lat !== undefined && (latRef === 'S' || latRef === 's')) lat = -lat;
+    if (lon !== undefined && (lonRef === 'W' || lonRef === 'w')) lon = -lon;
+    if (alt !== undefined && altRef === 1) alt = -alt;
+
+    return { lat, lon, alt, azimuth: imgDir };
+  }
+
+  function readFileBuffer(file) {
+    return new Promise((resolve, reject) => {
+      const reader = new FileReader();
+      reader.onload = () => resolve(reader.result);
+      reader.onerror = () => reject(new Error("Kon bestand niet inlezen."));
+      reader.readAsArrayBuffer(file);
+    });
+  }
+
+  function drawRoundedBox(ctx, x, y, w, h, r) {
+    ctx.beginPath();
+    ctx.moveTo(x + r, y);
+    ctx.lineTo(x + w - r, y);
+    ctx.quadraticCurveTo(x + w, y, x + w, y + r);
+    ctx.lineTo(x + w, y + h - r);
+    ctx.quadraticCurveTo(x + w, y + h, x + w - r, y + h);
+    ctx.lineTo(x + r, y + h);
+    ctx.quadraticCurveTo(x, y + h, x, y + h - r);
+    ctx.lineTo(x, y + r);
+    ctx.quadraticCurveTo(x, y, x + r, y);
+    ctx.closePath();
+    ctx.fill();
+  }
+
+  fileInput.addEventListener('change', async (e) => {
+    const files = Array.from(e.target.files || []);
+    if (files.length === 0) return;
+
+    statusBar.innerHTML = `Status: ${files.length} bestand(en) verwerken...`;
+    output.innerHTML = '';
+
+    for (const file of files) {
+      const card = document.createElement('div');
+      card.className = 'photo-card';
+      card.innerHTML = `<strong>📄 ${file.name}</strong><div class="meta-info">Metadata analyseren...</div>`;
+      output.appendChild(card);
+      const infoDiv = card.querySelector('.meta-info');
+
+      try {
+        const buffer = await readFileBuffer(file);
+
+        const xmp = parseRawXmp(buffer);
+        const binExif = parseExifGps(buffer);
+
+        let erTags = {};
+        if (typeof ExifReader !== 'undefined') {
+          try { erTags = ExifReader.load(buffer) || {}; } catch (_) {}
+        }
+        const erNum = (tag) => {
+          if (!erTags[tag]) return undefined;
+          const v = parseFloat(erTags[tag].description);
+          return (!isNaN(v) && v !== 0) ? v : undefined;
+        };
+
+        // Pak geldige niet-nul coördinaten uit XMP, Binaire EXIF of ExifReader
+        let lat = xmp.lat ?? binExif.lat ?? erNum('Latitude') ?? erNum('GPSLatitude');
+        let lon = xmp.lon ?? binExif.lon ?? erNum('Longitude') ?? erNum('GPSLongitude');
+
+        let relAlt = xmp.relAlt ?? erNum('RelativeAltitude');
+        let absAlt = binExif.alt ?? xmp.absAlt ?? erNum('GPSAltitude');
+
+        let rawAzimuth = xmp.azimuth 
+          ?? erNum('PoseHeadingDegrees') 
+          ?? erNum('GimbalYawDegree') 
+          ?? erNum('FlightYawDegree') 
+          ?? binExif.azimuth;
+
+        if (!lat || !lon || isNaN(lat) || isNaN(lon)) {
+          const isStripped = /^\d+\.jpe?g$/i.test(file.name);
+          let msg = `<span class="warning">❌ Geen GPS-data gevonden in ${file.name}.</span>`;
+          if (isStripped) {
+            msg += `<br><br>👉 <strong>Oorzaak:</strong> Ge hebt de foto gekozen via de Android Fotokiezer (<code>${file.name}</code>). Kies in het menu voor <strong>"Bladeren" / "Bestanden"</strong>!`;
+          }
+          infoDiv.innerHTML = msg;
+          statusBar.innerHTML = `Status: Klaar (geen GPS gevonden in ${file.name}).`;
+          continue;
+        }
+
+        const latStr = `${Math.abs(lat).toFixed(6)}° ${lat >= 0 ? 'N' : 'S'}`;
+        const lonStr = `${Math.abs(lon).toFixed(6)}° ${lon >= 0 ? 'E' : 'W'}`;
+
+        let altText = 'Hoogte: Onbekend';
+        if (relAlt !== undefined && !isNaN(relAlt)) {
+          altText = `Hoogte (AGL): ${relAlt.toFixed(1)} m`;
+        } else if (absAlt !== undefined && !isNaN(absAlt)) {
+          altText = `Hoogte (GPS): ${absAlt.toFixed(1)} m`;
+        }
+
+        let azimuthText = 'Azimuth: Niet beschikbaar';
+        if (rawAzimuth !== undefined && !isNaN(rawAzimuth)) {
+          const normAzimuth = ((rawAzimuth % 360) + 360) % 360;
+          azimuthText = `Azimuth: ${normAzimuth.toFixed(1)}°`;
+        }
+
+        infoDiv.innerHTML = `Coördinaten: <strong>${latStr}, ${lonStr}</strong><br>${altText}<br>${azimuthText}<br><em>Foto stempelen...</em>`;
+
+        const blob = new Blob([buffer], { type: file.type || 'image/jpeg' });
+        const imgUrl = URL.createObjectURL(blob);
+        const img = new Image();
+        img.src = imgUrl;
+        await new Promise((resolve, reject) => {
+          img.onload = resolve;
+          img.onerror = () => reject(new Error("Kon afbeelding niet tekenen."));
+        });
+
+        const canvas = document.createElement('canvas');
+        canvas.width = img.width;
+        canvas.height = img.height;
+        const ctx = canvas.getContext('2d');
+
+        ctx.drawImage(img, 0, 0);
+
+        const fontSize = Math.max(24, Math.round(img.width * 0.022));
+        const padding = Math.round(fontSize * 0.6);
+        const lineHeight = Math.round(fontSize * 1.35);
+
+        ctx.font = `bold ${fontSize}px monospace`;
+        const line1 = `📍 ${latStr}, ${lonStr}`;
+        const line2 = `🛸 ${altText}`;
+        const line3 = `🧭 ${azimuthText}`;
+
+        const textWidth = Math.max(ctx.measureText(line1).width, ctx.measureText(line2).width, ctx.measureText(line3).width);
+        const boxWidth = textWidth + (padding * 2);
+        const boxHeight = (lineHeight * 3) + (padding * 1.5);
+
+        const boxX = img.width - boxWidth - padding;
+        const boxY = img.height - boxHeight - padding;
+
+        ctx.fillStyle = 'rgba(0, 0, 0, 0.70)';
+        drawRoundedBox(ctx, boxX, boxY, boxWidth, boxHeight, 12);
+
+        ctx.fillStyle = '#ffffff';
+        ctx.fillText(line1, boxX + padding, boxY + padding + (fontSize * 0.85));
+        ctx.fillText(line2, boxX + padding, boxY + padding + (fontSize * 0.85) + lineHeight);
+        ctx.fillText(line3, boxX + padding, boxY + padding + (fontSize * 0.85) + (lineHeight * 2));
+
+        // Verticaal rood streepje onderaan in het midden
+        const lineLength = img.height * 0.08;
+        const lineWidth = Math.max(4, Math.round(img.width * 0.005));
+        const lineX = img.width / 2;
+        const lineY2 = img.height - Math.round(img.height * 0.02);
+        const lineY1 = lineY2 - lineLength;
+
+        ctx.strokeStyle = '#ff3333';
+        ctx.lineWidth = lineWidth;
+        ctx.lineCap = 'round';
+        ctx.beginPath();
+        ctx.moveTo(lineX, lineY1);
+        ctx.lineTo(lineX, lineY2);
+        ctx.stroke();
+
+        infoDiv.innerHTML = `✅ <strong>Succesvol verwerkt:</strong><br>📍 ${latStr}, ${lonStr}<br>🛸 ${altText}<br>🧭 ${azimuthText}`;
+
+        const dataUrl = canvas.toDataURL('image/jpeg', 0.95);
+        const resultImg = document.createElement('img');
+        resultImg.className = 'result-img';
+        resultImg.src = dataUrl;
+        card.appendChild(resultImg);
+
+        const downloadBtn = document.createElement('a');
+        downloadBtn.className = 'download-btn';
+        downloadBtn.href = dataUrl;
+        downloadBtn.download = `stamped_${file.name}`;
+        downloadBtn.innerText = '⬇️ Download Gestempelde Foto';
+        card.appendChild(downloadBtn);
+
+        statusBar.innerHTML = `Status: ✅ ${file.name} succesvol gestempeld!`;
+
+      } catch (err) {
+        infoDiv.innerHTML = `<span class="error">Fout bij verwerken: ${err.message}</span>`;
+        statusBar.innerHTML = `Status: ❌ Fout opgetreden.`;
+      }
+    }
+  });
+</script>
+
+</body>
+</html>
